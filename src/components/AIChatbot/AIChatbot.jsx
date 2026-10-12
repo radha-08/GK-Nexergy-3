@@ -1,0 +1,1005 @@
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  X,
+  Send,
+  RotateCcw,
+  ExternalLink,
+  ChevronRight,
+  Maximize2,
+  Minimize2,
+  Key,
+  ArrowDown,
+} from "lucide-react";
+import { askGKChatbot } from "../../utils/aiKnowledgeEngine";
+
+// Conversation starter pills
+const STARTER_SUGGESTIONS = [
+  "What does GK Nexergy do?",
+  "Which AI solutions do you provide?",
+  "Nexergy Academy courses",
+  "Talk about a project",
+  "How can I contact the team?",
+];
+
+// GK Nexergy Official Logo Avatar Mark
+const AIAvatarMark = ({ size = 36, isResponding = false, isDark = true }) => (
+  <div
+    style={{
+      width: `${size}px`,
+      height: `${size}px`,
+      borderRadius: "50%",
+      backgroundColor: isDark ? "#121420" : "#ebe3d6",
+      border: isDark ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid #d5c7b3",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "hidden",
+      flexShrink: 0,
+      boxShadow: isResponding
+        ? isDark
+          ? "0 0 10px rgba(16, 185, 129, 0.6), 0 0 3px rgba(5, 150, 105, 0.8)"
+          : "0 0 10px rgba(217, 119, 6, 0.5), 0 0 3px rgba(5, 150, 105, 0.6)"
+        : "0 1px 4px rgba(0, 0, 0, 0.2)",
+      transition: "box-shadow 0.3s ease",
+    }}
+  >
+    <img
+      src="/images/gk-avatar-badge.png"
+      alt="GK Nexergy Logo"
+      style={{ width: "100%", height: "100%", objectFit: "contain", padding: "2px" }}
+      className={isResponding ? "animate-pulse" : ""}
+    />
+  </div>
+);
+
+// Format markdown (emerald highlight in assistant messages)
+const formatMarkdown = (text, isDark, isUser) => {
+  if (!text) return "";
+  let formatted = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Bold **text** -> vibrant highlight in assistant messages
+  formatted = formatted.replace(
+    /\*\*(.*?)\*\*/g,
+    `<strong style="font-weight: 600; color: ${isUser ? "#ffffff" : isDark ? "#34d399" : "#059669"};">$1</strong>`
+  );
+
+  // Italic *text*
+  formatted = formatted.replace(
+    /\*(.*?)\*/g,
+    `<em style="font-style: italic; opacity: 0.9;">$1</em>`
+  );
+
+  return formatted;
+};
+
+export const AIChatbot = ({ theme = "light" }) => {
+  const navigate = useNavigate();
+  const [isOpen, setIsOpen] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
+  const [activeTopic, setActiveTopic] = useState("general");
+  const [hasNewMessageBelow, setHasNewMessageBelow] = useState(false);
+  const [chipsScrollPercent, setChipsScrollPercent] = useState(0);
+
+  const chatFeedRef = useRef(null);
+  const inputRef = useRef(null);
+  const chipsContainerRef = useRef(null);
+  const sliderTrackRef = useRef(null);
+  const userScrolledUpRef = useRef(false);
+  const isDraggingChipsRef = useRef(false);
+  const chipsDragStartXRef = useRef(0);
+  const chipsDragScrollLeftRef = useRef(0);
+  const chipsHasDraggedRef = useRef(false);
+  const isDark = theme === "dark";
+
+  // Exact welcome text from the user reference
+  const initialWelcomeText = `Hi 👋
+I'm the **GK Nexergy AI assistant**.
+
+I can help you explore our enterprise solutions, academy courses, client projects, careers, or answer any questions about the company.
+
+What would you like to know?`;
+
+  const [messages, setMessages] = useState(() => {
+    const saved = sessionStorage.getItem("gk_chat_classic_v2");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].text?.includes("GK Nexergy AI assistant")) {
+          return parsed;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    return [
+      {
+        id: "welcome-1",
+        sender: "bot",
+        text: initialWelcomeText,
+        time: "Just now",
+        routes: [],
+      },
+    ];
+  });
+
+  // Save conversation history to sessionStorage
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("gk_chat_classic_v2", JSON.stringify(messages));
+    } catch (e) {
+      // ignore
+    }
+  }, [messages]);
+
+  // Smoothly scroll feed to bottom
+  const scrollToBottom = useCallback((behavior = "smooth") => {
+    const feed = chatFeedRef.current;
+    if (feed) {
+      feed.scrollTo({
+        top: feed.scrollHeight,
+        behavior,
+      });
+      userScrolledUpRef.current = false;
+      setHasNewMessageBelow(false);
+    }
+  }, []);
+
+  // Track scroll position in feed
+  const handleFeedScroll = useCallback(() => {
+    const feed = chatFeedRef.current;
+    if (!feed) return;
+    const distanceToBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+    if (distanceToBottom > 60) {
+      userScrolledUpRef.current = true;
+    } else {
+      userScrolledUpRef.current = false;
+      setHasNewMessageBelow(false);
+    }
+  }, []);
+
+  // Track chips scroll
+  const handleChipsScroll = () => {
+    const el = chipsContainerRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    if (maxScroll > 0) {
+      const pct = Math.max(0, Math.min(100, (el.scrollLeft / maxScroll) * 100));
+      setChipsScrollPercent(pct);
+    } else {
+      setChipsScrollPercent(0);
+    }
+  };
+
+  const scrollChips = (dir) => {
+    const el = chipsContainerRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir * 180, behavior: "smooth" });
+  };
+
+  // Slider track interactive scrubbing / clicking
+  const handleTrackPointerDown = (e) => {
+    const track = sliderTrackRef.current;
+    const container = chipsContainerRef.current;
+    if (!track || !container) return;
+
+    const updateScroll = (clientX) => {
+      const rect = track.getBoundingClientRect();
+      const clickX = Math.max(0, Math.min(clientX - rect.left, rect.width));
+      const maxScroll = container.scrollWidth - container.clientWidth;
+      if (maxScroll <= 0) return;
+      const ratio = clickX / rect.width;
+      container.scrollLeft = ratio * maxScroll;
+    };
+
+    updateScroll(e.clientX ?? e.touches?.[0]?.clientX ?? 0);
+
+    const onPointerMove = (ev) => {
+      const clientX = ev.clientX ?? ev.touches?.[0]?.clientX;
+      if (clientX !== undefined) {
+        updateScroll(clientX);
+      }
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("touchmove", onPointerMove);
+      window.removeEventListener("touchend", onPointerUp);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("touchmove", onPointerMove, { passive: true });
+    window.addEventListener("touchend", onPointerUp);
+  };
+
+  // Drag-to-scroll on the suggestion chips container directly
+  const handleChipsMouseDown = (e) => {
+    if (!chipsContainerRef.current) return;
+    isDraggingChipsRef.current = true;
+    chipsHasDraggedRef.current = false;
+    chipsDragStartXRef.current = e.pageX - chipsContainerRef.current.offsetLeft;
+    chipsDragScrollLeftRef.current = chipsContainerRef.current.scrollLeft;
+  };
+
+  const handleChipsMouseMove = (e) => {
+    if (!isDraggingChipsRef.current || !chipsContainerRef.current) return;
+    e.preventDefault();
+    const x = e.pageX - chipsContainerRef.current.offsetLeft;
+    const walk = (x - chipsDragStartXRef.current) * 1.5;
+    if (Math.abs(walk) > 5) {
+      chipsHasDraggedRef.current = true;
+    }
+    chipsContainerRef.current.scrollLeft = chipsDragScrollLeftRef.current - walk;
+  };
+
+  const handleChipsMouseUp = () => {
+    isDraggingChipsRef.current = false;
+  };
+
+  // Keep feed scrolled to latest message
+  useEffect(() => {
+    if (!isOpen) return;
+    const timer = setTimeout(() => {
+      scrollToBottom("smooth");
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [messages, isTyping, isOpen, scrollToBottom]);
+
+  // Focus input when opened
+  useEffect(() => {
+    if (isOpen) {
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 150);
+    }
+  }, [isOpen]);
+
+  // Handle Send logic
+  const handleSend = useCallback(async (customText = null) => {
+    const query = (customText !== null ? customText : chatInput).trim();
+    if (!query) return;
+
+    const userMsg = {
+      id: `user-${Date.now()}`,
+      sender: "user",
+      text: query,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setChatInput("");
+    setIsTyping(true);
+
+    setTimeout(() => {
+      scrollToBottom("smooth");
+    }, 20);
+
+    try {
+      const response = await askGKChatbot(query, "", {
+        activeTopic,
+        history: messages,
+      });
+
+      setIsTyping(false);
+      if (!response) return;
+
+      if (response.topic) {
+        setActiveTopic(response.topic);
+      }
+
+      const botMsg = {
+        id: `bot-${Date.now()}`,
+        sender: "bot",
+        text: response.text,
+        routes: response.routes || [],
+        source: response.source,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+
+      setMessages((prev) => [...prev, botMsg]);
+
+      setTimeout(() => {
+        scrollToBottom("smooth");
+      }, 50);
+    } catch (err) {
+      setIsTyping(false);
+      const fallbackMsg = {
+        id: `bot-${Date.now()}`,
+        sender: "bot",
+        text: "I'm here to help! You can ask anything about GK Nexergy software solutions, academy courses, delivered projects, or connect directly with our engineering team in Visakhapatnam.",
+        routes: [{ label: "Contact Us", to: "/contact" }],
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setMessages((prev) => [...prev, fallbackMsg]);
+    }
+  }, [chatInput, activeTopic, messages, scrollToBottom]);
+
+  // Key down event
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // Global event listener for opening chatbot from anywhere
+  useEffect(() => {
+    const handleGlobalOpen = () => {
+      setIsOpen(true);
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 200);
+    };
+    window.addEventListener("open-gk-chatbot", handleGlobalOpen);
+    return () => window.removeEventListener("open-gk-chatbot", handleGlobalOpen);
+  }, []);
+
+  const handleClearHistory = () => {
+    sessionStorage.removeItem("gk_chat_classic_v2");
+    setActiveTopic("general");
+    setMessages([
+      {
+        id: `welcome-${Date.now()}`,
+        sender: "bot",
+        text: initialWelcomeText,
+        time: "Just now",
+        routes: [],
+      },
+    ]);
+  };
+
+  const fontStack = "'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
+  const chatbotJSX = (
+    <div style={{ fontFamily: fontStack }}>
+      {/* ========================================================= */}
+      {/* 1. FLOATING CHAT TRIGGER BUTTON                            */}
+      {/* ========================================================= */}
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0, y: 10 }}
+        animate={{ scale: 1, opacity: 1, y: 0 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        className="select-none"
+        style={{
+          position: "fixed",
+          bottom: "24px",
+          right: "24px",
+          zIndex: 99999999,
+          fontFamily: fontStack,
+        }}
+      >
+        <button
+          data-testid="floating-chatbot-toggle"
+          onClick={() => setIsOpen((prev) => !prev)}
+          aria-label={isOpen ? "Close GK Nexergy AI Assistant" : "GK Nexergy AI Assistant"}
+          className="group relative flex items-center transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95 select-none"
+          style={{
+            background: isOpen
+              ? isDark
+                ? "#10121a"
+                : "#fbf7f0"
+              : isDark
+                ? "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                : "linear-gradient(135deg, #059669 0%, #047857 100%)",
+            color: isOpen ? (isDark ? "#f8fafc" : "#1c1917") : "#ffffff",
+            border: isOpen
+              ? isDark
+                ? "1px solid rgba(16, 185, 129, 0.3)"
+                : "1.5px solid #d5c7b3"
+              : "none",
+            boxShadow: isOpen
+              ? isDark
+                ? "0 10px 30px rgba(0, 0, 0, 0.7)"
+                : "0 10px 25px rgba(120, 53, 15, 0.12)"
+              : isDark
+                ? "0 12px 28px rgba(16, 185, 129, 0.45), 0 4px 10px rgba(16, 185, 129, 0.2)"
+                : "0 12px 28px rgba(5, 150, 105, 0.35), 0 4px 10px rgba(217, 119, 6, 0.2)",
+            borderRadius: "9999px",
+            padding: isOpen ? "8px 16px" : "5px 18px 5px 6px",
+            fontFamily: fontStack,
+            height: "46px",
+          }}
+        >
+          {isOpen ? (
+            <div className="flex items-center gap-2 px-1">
+              <X className={`h-4 w-4 ${isDark ? "text-emerald-400" : "text-emerald-700"}`} />
+              <span style={{ fontSize: "13px", fontWeight: 700 }}>Close</span>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <div
+                style={{
+                  position: "relative",
+                  width: "36px",
+                  height: "36px",
+                  borderRadius: "50%",
+                  backgroundColor: isDark ? "#121420" : "#ebe3d6",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  overflow: "visible",
+                }}
+              >
+                <img
+                  src="/images/gk-avatar-badge.png"
+                  alt="GK Nexergy Logo"
+                  style={{
+                    width: "82%",
+                    height: "82%",
+                    objectFit: "contain",
+                    borderRadius: "50%",
+                  }}
+                  className="group-hover:scale-105 transition-transform duration-200"
+                />
+                <span
+                  style={{
+                    position: "absolute",
+                    top: "-1px",
+                    right: "-1px",
+                    width: "10px",
+                    height: "10px",
+                    borderRadius: "50%",
+                    backgroundColor: "#10b981",
+                    border: isDark ? "2px solid #10b981" : "2px solid #059669",
+                  }}
+                />
+              </div>
+              <span
+                style={{
+                  color: "#ffffff",
+                  fontWeight: 700,
+                  fontSize: "14px",
+                  letterSpacing: "-0.01em",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                GK Nexergy AI
+              </span>
+            </div>
+          )}
+        </button>
+      </motion.div>
+
+      {/* ========================================================= */}
+      {/* 2. FLOATING CHAT PANEL (Exact Classic Reference Style)     */}
+      {/* ========================================================= */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 14, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            data-testid="ai-chatbot-window"
+            data-lenis-prevent="true"
+            role="dialog"
+            aria-label="GK Nexergy AI Assistant"
+            className="flex flex-col overflow-hidden shadow-2xl select-none"
+            style={{
+              position: "fixed",
+              bottom: "74px",
+              right: "24px",
+              zIndex: 99999998,
+              width: isExpanded ? "min(640px, calc(100vw - 32px))" : "min(385px, calc(100vw - 32px))",
+              height: isExpanded ? "min(660px, calc(100vh - 96px))" : "min(560px, calc(100vh - 96px))",
+              borderRadius: "18px",
+              backgroundColor: isDark ? "#090a0f" : "#f5ede2",
+              border: isDark ? "1px solid rgba(16, 185, 129, 0.25)" : "1px solid #dfd5c4",
+              boxShadow: isDark
+                ? "0 25px 60px -10px rgba(0, 0, 0, 0.9), 0 0 1px 1px rgba(16, 185, 129, 0.15)"
+                : "0 20px 50px -10px rgba(41, 37, 36, 0.14), 0 0 1px 1px rgba(217, 119, 6, 0.1)",
+              color: isDark ? "#f8fafc" : "#1c1917",
+              fontFamily: fontStack,
+            }}
+          >
+            {/* --- HEADER --- */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "12px 16px",
+                backgroundColor: isDark ? "#10121a" : "#ebe3d6",
+                borderBottom: isDark ? "1px solid rgba(255, 255, 255, 0.08)" : "1px solid #dfd5c4",
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <AIAvatarMark size={36} isResponding={isTyping} isDark={isDark} />
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px", fontWeight: 700, color: isDark ? "#ffffff" : "#1c1917", letterSpacing: "-0.01em" }}>
+                      GK Nexergy AI
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: "4px", color: "#10b981", fontSize: "11.5px", fontWeight: 600 }}>
+                      <span style={{ width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#10b981" }} />
+                      Online
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Controls */}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: isDark ? "#94a3b8" : "#78716c" }}>
+                <button
+                  data-testid="ai-clear-btn"
+                  onClick={handleClearHistory}
+                  title="Refresh conversation"
+                  aria-label="Refresh conversation"
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: "inherit", padding: "4px", display: "flex", alignItems: "center" }}
+                >
+                  <RotateCcw style={{ width: "16px", height: "16px", strokeWidth: 1.75 }} />
+                </button>
+
+                <button
+                  onClick={() => setIsExpanded((prev) => !prev)}
+                  title={isExpanded ? "Collapse width" : "Expand width"}
+                  aria-label={isExpanded ? "Collapse width" : "Expand width"}
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: "inherit", padding: "4px", display: "flex", alignItems: "center" }}
+                  className="hidden sm:flex"
+                >
+                  {isExpanded ? <Minimize2 style={{ width: "16px", height: "16px", strokeWidth: 1.75 }} /> : <Maximize2 style={{ width: "16px", height: "16px", strokeWidth: 1.75 }} />}
+                </button>
+
+                <button
+                  data-testid="ai-close-btn"
+                  onClick={() => setIsOpen(false)}
+                  title="Close assistant"
+                  aria-label="Close assistant"
+                  style={{ background: "transparent", border: "none", cursor: "pointer", color: "inherit", padding: "4px", display: "flex", alignItems: "center" }}
+                >
+                  <X style={{ width: "16px", height: "16px", strokeWidth: 1.75 }} />
+                </button>
+              </div>
+            </div>
+
+            {/* --- CONVERSATION FEED --- */}
+            <div style={{ position: "relative", flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+              <div
+                ref={chatFeedRef}
+                className="gk-chat-feed-scroll"
+                onScroll={handleFeedScroll}
+                onWheel={(e) => e.stopPropagation()}
+                data-lenis-prevent="true"
+                style={{
+                  flex: 1,
+                  overflowY: "auto",
+                  padding: "16px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "14px",
+                  maxHeight: "100%",
+                  overscrollBehavior: "contain",
+                  touchAction: "pan-y",
+                  scrollBehavior: "smooth",
+                }}
+              >
+                {messages.map((msg) => {
+                  const isUser = msg.sender === "user";
+
+                  return (
+                    <motion.div
+                      key={msg.id}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.18 }}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: isUser ? "flex-end" : "flex-start",
+                        width: "100%",
+                      }}
+                    >
+                      {/* Message Bubble Card */}
+                      <div
+                        style={{
+                          maxWidth: "92%",
+                          backgroundColor: isUser ? undefined : isDark ? "#141724" : "#fbf7f0",
+                          background: isUser
+                            ? isDark
+                              ? "linear-gradient(135deg, #059669 0%, #047857 100%)"
+                              : "linear-gradient(135deg, #059669 0%, #047857 100%)"
+                            : undefined,
+                          color: isUser ? "#ffffff" : isDark ? "#f1f5f9" : "#1c1917",
+                          borderRadius: isUser ? "16px 16px 4px 16px" : "16px",
+                          border: isUser ? "none" : isDark ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e3d7c5",
+                          padding: isUser ? "10px 14px" : "16px 18px",
+                          boxShadow: isUser
+                            ? "0 2px 8px rgba(5, 150, 105, 0.28)"
+                            : isDark
+                              ? "0 2px 8px rgba(0, 0, 0, 0.4)"
+                              : "0 2px 8px rgba(41, 37, 36, 0.04)",
+                          fontSize: isUser ? "13px" : "13.5px",
+                          lineHeight: 1.6,
+                          letterSpacing: "-0.01em",
+                        }}
+                      >
+                        {/* Text Content */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "10px", whiteSpace: "pre-line" }}>
+                          {msg.text.split("\n\n").map((paragraph, pIdx) => {
+                            if (paragraph.includes("- ") || paragraph.includes("• ") || paragraph.includes("1. ")) {
+                              const lines = paragraph.split("\n");
+                              return (
+                                <div key={pIdx} style={{ display: "flex", flexDirection: "column", gap: "4px", margin: "4px 0" }}>
+                                  {lines.map((line, lIdx) => {
+                                    const isBullet = line.trim().startsWith("- ") || line.trim().startsWith("• ");
+                                    const isNumbered = /^\d+\.\s/.test(line.trim());
+                                    const cleanText = line.replace(/^[-•]\s*/, "").replace(/^\d+\.\s*/, "");
+
+                                    return (
+                                      <div key={lIdx} style={{ display: "flex", alignItems: "flex-start", gap: "6px" }}>
+                                        {isBullet && (
+                                          <span style={{ fontWeight: 700, fontSize: "13px", color: isUser ? "#ffffff" : isDark ? "#34d399" : "#059669", flexShrink: 0 }}>•</span>
+                                        )}
+                                        {isNumbered && (
+                                          <span style={{ fontWeight: 700, fontSize: "11px", color: isUser ? "#ffffff" : isDark ? "#34d399" : "#059669", flexShrink: 0 }}>
+                                            {line.match(/^\d+\./)?.[0]}
+                                          </span>
+                                        )}
+                                        <span dangerouslySetInnerHTML={{ __html: formatMarkdown(cleanText, isDark, isUser) }} />
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <p
+                                key={pIdx}
+                                style={{ margin: 0 }}
+                                dangerouslySetInnerHTML={{ __html: formatMarkdown(paragraph, isDark, isUser) }}
+                              />
+                            );
+                          })}
+                        </div>
+
+                        {/* Navigation Route Shortcuts */}
+                        {msg.routes && msg.routes.length > 0 && (
+                          <div style={{ marginTop: "12px", paddingTop: "8px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                            {msg.routes.slice(0, 3).map((route, rIdx) => (
+                              <button
+                                key={rIdx}
+                                onClick={() => {
+                                  if (route.external) {
+                                    window.open(route.to, "_blank", "noopener,noreferrer");
+                                  } else {
+                                    setIsOpen(false);
+                                    navigate(route.to);
+                                  }
+                                }}
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "4px",
+                                  padding: "5px 10px",
+                                  borderRadius: "8px",
+                                  fontSize: "11.5px",
+                                  fontWeight: 600,
+                                  cursor: "pointer",
+                                  border: isDark ? "1px solid rgba(16, 185, 129, 0.35)" : "1px solid #d5c7b3",
+                                  backgroundColor: isDark ? "rgba(16, 185, 129, 0.15)" : "#ebe3d6",
+                                  color: isDark ? "#34d399" : "#059669",
+                                  transition: "all 0.15s ease",
+                                }}
+                              >
+                                <span>{route.label}</span>
+                                {route.external ? (
+                                  <ExternalLink style={{ width: "13px", height: "13px", opacity: 0.8 }} />
+                                ) : (
+                                  <ChevronRight style={{ width: "13px", height: "13px", opacity: 0.8 }} />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Timestamp */}
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          marginTop: "5px",
+                          paddingLeft: "4px",
+                          fontFamily: "'Space Grotesk', monospace",
+                          color: isDark ? "#94a3b8" : "#78716c",
+                        }}
+                      >
+                        {msg.time}
+                      </span>
+                    </motion.div>
+                  );
+                })}
+
+                {/* Typing Indicator */}
+                {isTyping && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 3 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                  >
+                    <AIAvatarMark size={24} isResponding={true} isDark={isDark} />
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        padding: "8px 12px",
+                        borderRadius: "14px",
+                        backgroundColor: isDark ? "#141724" : "#fbf7f0",
+                        border: isDark ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e3d7c5",
+                      }}
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-bounce" style={{ animationDelay: "150ms" }} />
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-bounce" style={{ animationDelay: "300ms" }} />
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+
+              {/* Floating "↓ New message" Indicator */}
+              <AnimatePresence>
+                {hasNewMessageBelow && (
+                  <motion.button
+                    initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 6, scale: 0.95 }}
+                    onClick={() => scrollToBottom("smooth")}
+                    style={{
+                      position: "absolute",
+                      bottom: "12px",
+                      right: "16px",
+                      zIndex: 20,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "5px 10px",
+                      borderRadius: "9999px",
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      backgroundColor: isDark ? "#141724" : "#fbf7f0",
+                      color: isDark ? "#34d399" : "#059669",
+                      border: isDark ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid #d5c7b3",
+                      boxShadow: "0 4px 14px rgba(0,0,0,0.15)",
+                    }}
+                  >
+                    <ArrowDown style={{ width: "12px", height: "12px" }} />
+                    <span>New message</span>
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* --- STARTER SUGGESTION CHIPS (Exact reference layout with interactive responsive slider) --- */}
+            {messages.length <= 2 && !isTyping && (
+              <div style={{ padding: "6px 12px 10px 12px", flexShrink: 0 }}>
+                <div
+                  ref={chipsContainerRef}
+                  onScroll={handleChipsScroll}
+                  onMouseDown={handleChipsMouseDown}
+                  onMouseMove={handleChipsMouseMove}
+                  onMouseUp={handleChipsMouseUp}
+                  onMouseLeave={handleChipsMouseUp}
+                  onWheel={(e) => {
+                    if (e.deltaY !== 0 || e.deltaX !== 0) {
+                      e.stopPropagation();
+                      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+                      chipsContainerRef.current.scrollLeft += delta;
+                    }
+                  }}
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    overflowX: "auto",
+                    scrollbarWidth: "none",
+                    msOverflowStyle: "none",
+                    scrollBehavior: "smooth",
+                    cursor: "grab",
+                    userSelect: "none",
+                    WebkitOverflowScrolling: "touch",
+                  }}
+                  className="no-scrollbar"
+                >
+                  {STARTER_SUGGESTIONS.map((suggestion, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        if (chipsHasDraggedRef.current) return;
+                        handleSend(suggestion);
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        padding: "8px 14px",
+                        borderRadius: "10px",
+                        fontSize: "12px",
+                        fontWeight: 500,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        backgroundColor: isDark ? "#141724" : "#fbf7f0",
+                        color: isDark ? "#34d399" : "#059669",
+                        border: isDark ? "1px solid rgba(16, 185, 129, 0.25)" : "1px solid #e3d7c5",
+                        transition: "all 0.15s ease",
+                        fontFamily: fontStack,
+                      }}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Horizontal Scroll Track Slider */}
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "8px", padding: "0 2px" }}>
+                  <button
+                    type="button"
+                    onClick={() => scrollChips(-1)}
+                    aria-label="Scroll left"
+                    title="Scroll left"
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      color: isDark ? "#94a3b8" : "#64748b",
+                      fontSize: "10px",
+                      padding: "2px 4px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: "4px",
+                      userSelect: "none",
+                    }}
+                  >
+                    ◀
+                  </button>
+
+                  {/* Interactive Track & Draggable Thumb */}
+                  <div
+                    ref={sliderTrackRef}
+                    onPointerDown={handleTrackPointerDown}
+                    style={{
+                      flex: 1,
+                      height: "6px",
+                      backgroundColor: isDark ? "#161926" : "#dfd5c4",
+                      borderRadius: "9999px",
+                      overflow: "hidden",
+                      position: "relative",
+                      cursor: "pointer",
+                      touchAction: "none",
+                    }}
+                    title="Click or drag to scroll suggestions"
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        backgroundColor: isDark ? "#10b981" : "#059669",
+                        borderRadius: "9999px",
+                        width: "42%",
+                        marginLeft: `${Math.min(58, (chipsScrollPercent / 100) * 58)}%`,
+                        transition: "margin 0.08s ease-out",
+                        cursor: "grab",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => scrollChips(1)}
+                    aria-label="Scroll right"
+                    title="Scroll right"
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      color: isDark ? "#94a3b8" : "#64748b",
+                      fontSize: "10px",
+                      padding: "2px 4px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: "4px",
+                      userSelect: "none",
+                    }}
+                  >
+                    ▶
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* --- INPUT BAR --- */}
+            <div
+              style={{
+                padding: "10px 12px 14px 12px",
+                backgroundColor: isDark ? "#090a0f" : "#f5ede2",
+                flexShrink: 0,
+              }}
+            >
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSend();
+                }}
+                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+              >
+                {/* Main Text Input Field */}
+                <div
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    borderRadius: "12px",
+                    padding: "9px 14px",
+                    backgroundColor: isDark ? "#141724" : "#fbf7f0",
+                    border: isDark ? "2px solid rgba(16, 185, 129, 0.35)" : "2px solid #d5c7b3",
+                    transition: "border-color 0.2s ease",
+                  }}
+                >
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Ask GK Nexergy anything..."
+                    data-testid="ai-chat-input"
+                    style={{
+                      width: "100%",
+                      border: "none",
+                      outline: "none",
+                      background: "transparent",
+                      fontSize: "13px",
+                      color: isDark ? "#ffffff" : "#1c1917",
+                      fontFamily: fontStack,
+                    }}
+                  />
+                </div>
+
+                {/* Send Button */}
+                <button
+                  type="submit"
+                  disabled={!chatInput.trim() || isTyping}
+                  data-testid="ai-send-btn"
+                  aria-label="Send message"
+                  style={{
+                    width: "42px",
+                    height: "42px",
+                    borderRadius: "12px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                    cursor: chatInput.trim() && !isTyping ? "pointer" : "not-allowed",
+                    backgroundColor: chatInput.trim() && !isTyping ? (isDark ? "#10b981" : "#059669") : isDark ? "#141724" : "#ebe3d6",
+                    borderColor: chatInput.trim() && !isTyping ? (isDark ? "#10b981" : "#059669") : isDark ? "rgba(255,255,255,0.1)" : "#dfd5c4",
+                    borderWidth: "1.5px",
+                    borderStyle: "solid",
+                    color: chatInput.trim() && !isTyping ? "#ffffff" : isDark ? "#64748b" : "#78716c",
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  <Send style={{ width: "16px", height: "16px" }} />
+                </button>
+              </form>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+
+  return createPortal(chatbotJSX, document.body);
+};
+
+export default AIChatbot;
